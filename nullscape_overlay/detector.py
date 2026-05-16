@@ -33,13 +33,18 @@ except ImportError:  # mss isn't strictly needed for unit tests
 # Multi-font templates lift the per-digit best score, so we can hold the
 # threshold at a level where 3 doesn't get confused with 8.
 MATCH_THRESHOLD = 0.42
-# Hole count (topological invariant) per digit — used as a hard tiebreaker
-# because cross-correlation alone can't reliably distinguish 3 from 8 or
-# 0 from 8 at the small resolution Roblox renders the level digit.
+# Hole count (topological invariant) per digit — used as a tiebreaker when
+# the cross-correlation top-two are close enough that we can't trust the
+# winner (e.g. real "3" scoring 0.528 for 8 vs 0.521 for 3).
 DIGIT_HOLE_COUNT = {
     "0": 1, "1": 0, "2": 0, "3": 0, "4": 1,
     "5": 0, "6": 1, "7": 0, "8": 2, "9": 1,
 }
+# How close the runner-up has to be to the winner to trigger the topology
+# tiebreaker. If the gap is wider than this, the correlation winner is
+# trusted on its own (no topology check, so detection is robust even when
+# anti-aliasing makes hole counting unreliable at the digit's rendered size).
+TOPOLOGY_TIEBREAKER_MARGIN = 0.06
 # Plausible level range — anything outside this is treated as a misread.
 MIN_LEVEL = 0
 MAX_LEVEL = 30
@@ -168,16 +173,12 @@ def _isolate_digit_blobs(region_bgr: np.ndarray) -> list[tuple[int, int, int, in
     return boxes
 
 
-def _match_digit(
+def _score_all_digits(
     crop_gray: np.ndarray,
     templates: dict[str, list[np.ndarray]],
-) -> tuple[str, float, float]:
-    """Correlate against EVERY font variant of EVERY digit.
-
-    Returns (best_digit, best_score, runner_up_score) so the caller can also
-    reject ambiguous matches where two digits score nearly the same — that's
-    how 3 ends up being read as an 8.
-    """
+) -> dict[str, float]:
+    """Return the best cross-correlation score per digit across every font
+    variant. Caller decides what to do with the ranking."""
     _, crop_bin = cv2.threshold(crop_gray, DIGIT_BRIGHTNESS_MIN, 255, cv2.THRESH_BINARY)
 
     target_h = next(iter(templates.values()))[0].shape[0]
@@ -202,25 +203,29 @@ def _match_digit(
             if score > digit_best:
                 digit_best = score
         digit_scores[digit] = digit_best
-
-    ranked = sorted(digit_scores.items(), key=lambda kv: kv[1], reverse=True)
-    best_digit, best_score = ranked[0]
-    runner_up = ranked[1][1] if len(ranked) > 1 else -1.0
-    return best_digit, best_score, runner_up
+    return digit_scores
 
 
 def _count_holes(binary_mask: np.ndarray) -> int:
     """Count enclosed background regions inside the digit (topological holes).
 
-    Anti-aliased dim text can leave thin gaps in stroke connectivity that
-    look like extra "holes"; we dilate first to fill them.
+    Roblox's anti-aliased small digits often have 1-pixel gaps in the stroke
+    outline that let an interior hole "leak" to the outside. A morphological
+    close with a 2x2 kernel seals those 1-pixel gaps. Holes ≥ 2 pixels across
+    survive — at this size the smallest real hole (the apex triangle in a "4")
+    is roughly 2x2 px, so this is right on the boundary. We also reject
+    enclosed regions of fewer than 2 pixels² as anti-aliasing noise.
     """
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    dilated = cv2.dilate(binary_mask, kernel, iterations=1)
-    contours, hierarchy = cv2.findContours(dilated, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    if hierarchy is None:
+    closed = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
+    contours, hierarchy = cv2.findContours(closed, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None or len(contours) == 0:
         return 0
-    return sum(1 for h in hierarchy[0] if h[3] != -1)
+    return sum(
+        1
+        for i, h in enumerate(hierarchy[0])
+        if h[3] != -1 and cv2.contourArea(contours[i]) >= 2.0
+    )
 
 
 def detect_level(region_bgr: np.ndarray, templates: dict[str, list[np.ndarray]]) -> int | None:
@@ -239,24 +244,31 @@ def detect_level(region_bgr: np.ndarray, templates: dict[str, list[np.ndarray]])
     for x, y, w, h in boxes:
         crop = gray[y:y + h, x:x + w]
 
-        # Topology filter: only consider digits that share the crop's hole
-        # count. This is the workhorse that prevents 3/8 and 0/8 confusion
-        # at small render sizes where cross-correlation isn't decisive.
-        _, crop_bin = cv2.threshold(crop, DIGIT_BRIGHTNESS_MIN, 255, cv2.THRESH_BINARY)
-        observed_holes = _count_holes(crop_bin)
-        candidates = {
-            d: variants
-            for d, variants in templates.items()
-            if DIGIT_HOLE_COUNT[d] == observed_holes
-        }
-        if not candidates:
-            # Unusual rendering (e.g. broken anti-aliasing) — fall back to all.
-            candidates = templates
+        scores = _score_all_digits(crop, templates)
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        best_digit, best_score = ranked[0]
+        runner_up = ranked[1][1] if len(ranked) > 1 else -1.0
 
-        digit, score, _runner_up = _match_digit(crop, candidates)
-        if score < MATCH_THRESHOLD:
+        if best_score < MATCH_THRESHOLD:
             return None
-        digits.append(digit)
+
+        # If the runner-up is uncomfortably close, the winner is suspect.
+        # Re-rank by topology: keep only candidates whose canonical hole count
+        # matches the observed crop, then pick the highest score among those.
+        if best_score - runner_up < TOPOLOGY_TIEBREAKER_MARGIN:
+            _, crop_bin = cv2.threshold(crop, DIGIT_BRIGHTNESS_MIN, 255, cv2.THRESH_BINARY)
+            observed_holes = _count_holes(crop_bin)
+            topo_match = [
+                (d, s) for d, s in ranked
+                if DIGIT_HOLE_COUNT[d] == observed_holes and s >= MATCH_THRESHOLD
+            ]
+            if topo_match:
+                best_digit = topo_match[0][0]
+            # else: no topology match within threshold — fall through and keep
+            # the correlation winner; better an occasional wrong guess than no
+            # detection at all when the player is mid-shop.
+
+        digits.append(best_digit)
 
     try:
         value = int("".join(digits))
