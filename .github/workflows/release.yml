@@ -27,8 +27,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tests
-        run: pytest -q
-        continue-on-error: false
+        run: pytest -v --tb=short -ra
 
       - name: Build executable
         run: pyinstaller build.spec --noconfirm --clean
