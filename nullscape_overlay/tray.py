@@ -52,42 +52,36 @@ class TrayIcon(QSystemTrayIcon):
         self._detector = detector
         self.setToolTip(f"Nullscape Overlay {__version__} — Duo Standard")
 
-        menu = QMenu()
+        # Keep menu + actions parented to self so Python GC can't snip them
+        # before the user opens the menu (this has bitten PyQt apps before).
+        self._menu = QMenu()
+        self._actions: list[QAction] = []
 
-        self._toggle = QAction("Hide overlay")
-        self._toggle.triggered.connect(self._on_toggle)
-        menu.addAction(self._toggle)
+        def add(text: str, slot) -> QAction:
+            act = QAction(text, self)
+            act.triggered.connect(slot)
+            self._menu.addAction(act)
+            self._actions.append(act)
+            return act
 
-        menu.addSeparator()
+        self._toggle = add("Hide overlay", self._on_toggle)
+
+        self._menu.addSeparator()
 
         if detector is not None:
-            snap_act = QAction("Save detection snapshot")
-            snap_act.triggered.connect(self._on_snapshot)
-            menu.addAction(snap_act)
-
-            open_diag = QAction("Open diagnostics folder")
-            open_diag.triggered.connect(self._on_open_diagnostics)
-            menu.addAction(open_diag)
-
+            add("Save detection snapshot", self._on_snapshot)
+            add("Open diagnostics folder", self._on_open_diagnostics)
             detector.diagnostic_saved.connect(self._on_diagnostic_saved)
+            self._menu.addSeparator()
 
-            menu.addSeparator()
+        add("About…", self._on_about)
+        add("Show config path", self._on_config)
+        self._menu.addSeparator()
+        app = QApplication.instance()
+        if app is not None:
+            add("Quit", app.quit)
 
-        about = QAction("About…")
-        about.triggered.connect(self._on_about)
-        menu.addAction(about)
-
-        config = QAction("Show config path")
-        config.triggered.connect(self._on_config)
-        menu.addAction(config)
-
-        menu.addSeparator()
-
-        quit_act = QAction("Quit")
-        quit_act.triggered.connect(QApplication.instance().quit)  # type: ignore[union-attr]
-        menu.addAction(quit_act)
-
-        self.setContextMenu(menu)
+        self.setContextMenu(self._menu)
         self.activated.connect(self._on_activated)
 
     def _on_toggle(self) -> None:
