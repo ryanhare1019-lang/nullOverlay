@@ -15,7 +15,7 @@ datas = [
 ]
 
 a = Analysis(
-    [str(pkg / "__main__.py")],
+    [str(root / "entrypoint.py")],
     pathex=[str(root)],
     binaries=[],
     datas=datas,
