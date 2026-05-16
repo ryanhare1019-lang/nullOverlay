@@ -106,6 +106,10 @@ def icons_dir() -> Path:
     return asset_dir() / "icons"
 
 
+def fonts_dir() -> Path:
+    return asset_dir() / "fonts"
+
+
 def example_user_config() -> str:
     """Print this to help users write their own override file."""
     return json.dumps(

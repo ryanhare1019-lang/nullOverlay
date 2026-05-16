@@ -12,6 +12,7 @@ pkg = root / "nullscape_overlay"
 # ship a digits subtree.
 datas = [
     (str(pkg / "assets" / "icons"), "assets/icons"),
+    (str(pkg / "assets" / "fonts"), "assets/fonts"),
 ]
 
 a = Analysis(

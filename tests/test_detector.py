@@ -19,10 +19,11 @@ def templates():
     return build_digit_templates(digit_height_px=DIGIT_HEIGHT)
 
 
-def _compose_level_image(value: int, templates: dict[str, np.ndarray]) -> np.ndarray:
-    """Place the digit templates side-by-side onto a black canvas, return BGR."""
+def _compose_level_image(value: int, templates: dict[str, list[np.ndarray]]) -> np.ndarray:
+    """Place the first template variant of each digit side-by-side on a black
+    canvas. Returns BGR."""
     text = str(value)
-    digit_imgs = [templates[d] for d in text]
+    digit_imgs = [templates[d][0] for d in text]
     pad = 4
     spacing = 2
     canvas_w = sum(d.shape[1] for d in digit_imgs) + spacing * (len(digit_imgs) - 1) + pad * 2
@@ -37,9 +38,11 @@ def _compose_level_image(value: int, templates: dict[str, np.ndarray]) -> np.nda
 
 def test_templates_built_for_all_digits(templates):
     assert set(templates.keys()) == {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
-    for arr in templates.values():
-        assert arr.dtype == np.uint8
-        assert arr.shape[0] == DIGIT_HEIGHT
+    for digit, variants in templates.items():
+        assert len(variants) >= 1, f"digit {digit} has no variants"
+        for arr in variants:
+            assert arr.dtype == np.uint8
+            assert arr.shape[0] == DIGIT_HEIGHT
 
 
 @pytest.mark.parametrize("level", [0, 1, 2, 3, 5, 7, 8, 9, 10, 13, 15])
