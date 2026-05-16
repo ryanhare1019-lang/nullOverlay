@@ -42,7 +42,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import ResolutionPreset, fonts_dir, icons_dir
-from .shops import Item, SHOPS, is_shop_level, next_shop_target
+from .shops import Item, SHOPS, is_shop_level, next_shop_level, next_shop_target
 
 
 # Theme colors. Backgrounds use moderate alpha so the game shows through.
@@ -156,36 +156,36 @@ def _load_icon(name: str, size: int) -> QPixmap:
     return _placeholder_icon((name or "?")[0], size)
 
 
-def _gem_icon(size: int) -> QPixmap:
-    """Tiny teal hexagonal gem, drawn at runtime — matches the in-game gift
-    counter icon without bundling another asset."""
+_GIFT_PIXMAP_CACHE: dict[int, QPixmap] = {}
+
+
+def _gift_icon(size: int) -> QPixmap:
+    """Golden Gift icon from the Nullscape wiki, scaled to the requested size.
+
+    Cached because every price label re-requests the same size."""
+    if size in _GIFT_PIXMAP_CACHE:
+        return _GIFT_PIXMAP_CACHE[size]
+    path = icons_dir() / "_golden_gift.png"
+    if path.exists():
+        pm = QPixmap(str(path))
+        if not pm.isNull():
+            scaled = pm.scaled(
+                size, size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            _GIFT_PIXMAP_CACHE[size] = scaled
+            return scaled
+    # Fallback: a small gold square so the price area never disappears.
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    cx, cy = size / 2.0, size / 2.0
-    rx = size * 0.38
-    ry = size * 0.45
-    poly = QPolygonF([
-        QPointF(cx, cy - ry),
-        QPointF(cx + rx, cy - ry * 0.3),
-        QPointF(cx + rx, cy + ry * 0.3),
-        QPointF(cx, cy + ry),
-        QPointF(cx - rx, cy + ry * 0.3),
-        QPointF(cx - rx, cy - ry * 0.3),
-    ])
-    grad = QLinearGradient(0, 0, 0, size)
-    grad.setColorAt(0.0, COLOR_GEM_HIGHLIGHT)
-    grad.setColorAt(0.55, COLOR_GEM)
-    grad.setColorAt(1.0, COLOR_GEM_DARK)
-    p.setBrush(QBrush(grad))
-    p.setPen(QColor(255, 255, 255, 70))
-    p.drawPolygon(poly)
-    # Highlight stroke on the upper-left facet for a polished look.
-    p.setPen(QColor(255, 255, 255, 140))
-    p.drawLine(QPointF(cx - rx, cy - ry * 0.3), QPointF(cx, cy - ry))
+    p.setBrush(QColor(230, 200, 80, 230))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRoundedRect(2, 2, size - 4, size - 4, 4, 4)
     p.end()
+    _GIFT_PIXMAP_CACHE[size] = pm
     return pm
 
 
@@ -228,10 +228,10 @@ class _ItemRow(QFrame):
             )
             layout.addWidget(cost_label)
         elif item.cost is not None:
-            gem = QLabel()
-            gem.setPixmap(_gem_icon(gem_size))
-            gem.setFixedSize(gem_size, gem_size)
-            layout.addWidget(gem)
+            gift = QLabel()
+            gift.setPixmap(_gift_icon(gem_size))
+            gift.setFixedSize(gem_size, gem_size)
+            layout.addWidget(gift)
             cost_label = QLabel(str(item.cost))
             cost_label.setFont(_body_font(int(15 * scale), bold=True))
             cost_label.setStyleSheet(
@@ -284,9 +284,9 @@ class OverlayWindow(QWidget):
         self._scale = scale
         self._width = int(400 * scale)
         self._padding = int(14 * scale)
-        # Cap height so the overlay never spills off-screen. Anything taller
-        # than this scrolls inside the body.
-        self._max_height = int(560 * scale)
+        # Hard upper bound on overlay height — keeps it well below the middle
+        # of the screen even on shorter monitors. Content beyond this scrolls.
+        self._max_height = int(420 * scale)
 
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(self._padding, self._padding, self._padding, self._padding)
@@ -384,19 +384,56 @@ class OverlayWindow(QWidget):
             event.accept()
 
     # --------------------------------------------------------------- layout
+    def _body_content_height(self) -> int:
+        """Sum the natural heights of every row + spacing.
+
+        We query each child's sizeHint directly because QScrollArea masks
+        the inner body widget's own sizeHint (with setWidgetResizable=True
+        it sizes the inner widget to fit the viewport, not the content).
+        """
+        spacing = self._body.spacing()
+        count = self._body.count()
+        total = 0
+        for i in range(count):
+            w = self._body.itemAt(i).widget()
+            if w is None:
+                continue
+            total += max(w.sizeHint().height(), w.minimumSizeHint().height())
+        if count > 1:
+            total += spacing * (count - 1)
+        return total
+
+    def _desired_height(self) -> int:
+        scale = self._scale
+        chrome = (
+            self._padding * 2
+            + self._header.sizeHint().height()
+            + self._sub_header.sizeHint().height()
+            + self._footer.sizeHint().height()
+            + int(6 * scale) * 3  # spacing between the four stacked elements
+        )
+        # isVisible() returns False until the parent window is shown — use
+        # isHidden() (the explicit hide() state) so initial-render sizing works.
+        if not self._scroll.isHidden():
+            chrome += self._body_content_height()
+        return chrome
+
     def _reposition(self) -> None:
         screen = QGuiApplication.primaryScreen()
         if screen is None:
             return
+        # Clear any height lock from the previous render before re-measuring.
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+
         geo = screen.geometry()
         left_off, bot_off = self._preset.overlay_pos
-        self.adjustSize()
-        h = max(self.height(), self.sizeHint().height())
-        if h > self._max_height:
-            h = self._max_height
-            self.setFixedHeight(h)
+        target = min(self._desired_height(), self._max_height)
+        # Floor: keep header + sub-header + footer visible even if no body.
+        target = max(target, int(110 * self._scale))
+        self.setFixedHeight(target)
         x = geo.left() + left_off
-        y = geo.bottom() - h - bot_off
+        y = geo.bottom() - target - bot_off
         y = max(geo.top() + bot_off, y)
         self.move(x, y)
 
@@ -444,9 +481,10 @@ class OverlayWindow(QWidget):
                     self._body.addWidget(_ItemRow(item, scale))
         else:
             target = next_shop_target(level)
+            next_lvl = next_shop_level(level)
             self._header.setText(f"Good luck!  ·  Level {level}")
-            if target is not None:
-                self._sub_header.setText(f"Target:  {target} gifts")
+            if target is not None and next_lvl is not None:
+                self._sub_header.setText(f"Target:  {target} gifts by level {next_lvl}")
             else:
                 self._sub_header.setText("No more shops")
             # No rows between shops — collapse the scroll area to nothing so
