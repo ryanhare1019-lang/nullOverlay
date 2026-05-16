@@ -1,0 +1,5 @@
+PyQt6>=6.7,<6.9
+mss>=9.0
+numpy>=1.26
+Pillow>=10.0
+opencv-python-headless>=4.10

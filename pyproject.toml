@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nullscape-overlay"
+version = "0.1.0"
+description = "Roblox Nullscape shop-upgrade overlay (Duo Standard)"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "PyQt6>=6.7,<6.9",
+    "mss>=9.0",
+    "numpy>=1.26",
+    "Pillow>=10.0",
+    "opencv-python-headless>=4.10",
+]
+
+[project.scripts]
+nullscape-overlay = "nullscape_overlay.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["nullscape_overlay*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

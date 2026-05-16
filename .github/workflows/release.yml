@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -q
+        continue-on-error: false
+
+      - name: Build executable
+        run: pyinstaller build.spec --noconfirm --clean
+
+      - name: Verify artifact
+        run: |
+          if (-not (Test-Path "dist/NullscapeOverlay.exe")) {
+            Write-Error "Build artifact missing"
+            exit 1
+          }
+          $size = (Get-Item "dist/NullscapeOverlay.exe").Length / 1MB
+          Write-Host ("Artifact size: {0:N1} MB" -f $size)
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NullscapeOverlay.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Upload as workflow artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: NullscapeOverlay
+          path: dist/NullscapeOverlay.exe
