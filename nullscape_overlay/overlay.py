@@ -100,10 +100,8 @@ class _ItemRow(QFrame):
         icon_label.setFixedSize(icon_size, icon_size)
         layout.addWidget(icon_label)
 
-        name_text = item.name
-        if item.type == "maybe":
-            name_text = f"MAYBE {name_text}"
-        name_label = QLabel(name_text)
+        # Yellow background alone signals "maybe" — no text prefix needed.
+        name_label = QLabel(item.name)
         name_font = QFont()
         name_font.setPixelSize(int(13 * scale))
         name_font.setBold(True)
@@ -206,7 +204,6 @@ class OverlayWindow(QWidget):
         self._root.addWidget(self._header)
         self._root.addWidget(self._sub_header)
         self._root.addLayout(self._body)
-        self._root.addStretch(1)
         self._root.addWidget(self._footer)
 
         self.setFixedWidth(self._width)
@@ -227,11 +224,20 @@ class OverlayWindow(QWidget):
         screen = QGuiApplication.primaryScreen()
         if screen is None:
             return
-        geo = screen.availableGeometry()
+        # Use full screen geometry, not availableGeometry — when Roblox runs
+        # fullscreen the taskbar is hidden, but availableGeometry can still
+        # report a smaller bottom (or in some DPI configs, the wrong bottom),
+        # which clipped the overlay below the visible area.
+        geo = screen.geometry()
         left_off, bot_off = self._preset.overlay_pos
+        # Force the layout to settle so height() reflects the new contents
+        # before we anchor to it.
         self.adjustSize()
+        h = max(self.height(), self.sizeHint().height())
         x = geo.left() + left_off
-        y = geo.bottom() - self.height() - bot_off
+        y = geo.bottom() - h - bot_off
+        # Clamp so the overlay can never spill off the top OR bottom of screen.
+        y = max(geo.top() + bot_off, y)
         self.move(x, y)
 
     def set_level(self, level: int) -> None:

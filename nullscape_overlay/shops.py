@@ -3,9 +3,9 @@
 Shops appear at fixed levels. Each shop lists recommended buys.
 Type drives the row color in the overlay:
   - "upgrade" -> green
-  - "maybe"   -> yellow
-  - "curse"   -> red (price shown as "(curse)")
-  - "choice"  -> "Choose one:" header with two indented sub-options
+  - "maybe"   -> yellow (optional, NOT included in shop total)
+  - "curse"   -> red    (price shown as "(curse)", informational only)
+  - "choice"  -> "Choose one:" header; the cheaper sub-option is added to total
 """
 from __future__ import annotations
 
@@ -27,17 +27,35 @@ class Item:
 @dataclass(frozen=True)
 class Shop:
     level: int
-    total: int
     items: tuple[Item, ...]
+
+    @property
+    def total(self) -> int:
+        """Minimum gift count to buy everything green at this shop.
+
+        Includes "upgrade" rows plus the cheaper option from any "choice"
+        groups. Excludes "maybe" (optional) and "curse" (no cost) rows so
+        the displayed total matches the sum of the displayed prices the
+        player actually needs.
+        """
+        total = 0
+        for item in self.items:
+            if item.type == "upgrade" and item.cost is not None:
+                total += item.cost
+            elif item.type == "choice":
+                option_costs = [o.cost for o in item.options if o.cost is not None]
+                if option_costs:
+                    total += min(option_costs)
+        return total
 
 
 SHOPS: dict[int, Shop] = {
-    3: Shop(level=3, total=415, items=(
+    3: Shop(level=3, items=(
         Item("Paycheck", 78, "upgrade"),
-        Item("Business License", 266, "upgrade"),
+        Item("Business License", 108, "upgrade"),
         Item("Adrenaline", 71, "maybe"),
     )),
-    5: Shop(level=5, total=714, items=(
+    5: Shop(level=5, items=(
         Item("Swiftness Rings", 114, "upgrade"),
         Item("Medal", 142, "upgrade"),
         Item("Adrenaline", 71, "upgrade"),
@@ -45,7 +63,7 @@ SHOPS: dict[int, Shop] = {
         Item("Paycheck", 78, "upgrade"),
         Item("Defuse Kit", 43, "maybe"),
     )),
-    8: Shop(level=8, total=1996, items=(
+    8: Shop(level=8, items=(
         Item("Double Jump", 213, "upgrade"),
         Item("Grace Wings", 425, "upgrade"),
         Item("Swiftness Rings", 114, "upgrade"),
@@ -54,7 +72,7 @@ SHOPS: dict[int, Shop] = {
         Item("Defuse Kit", 43, "maybe"),
         Item("Lap 2", None, "curse"),
     )),
-    10: Shop(level=10, total=2642, items=(
+    10: Shop(level=10, items=(
         Item("Pocket Bell", 425, "upgrade"),
         Item("Advanced Gravity Coil", 849, "upgrade"),
         Item("Swiftness Rings", 114, "upgrade"),
@@ -66,7 +84,7 @@ SHOPS: dict[int, Shop] = {
             Item("More Alters", 849, "upgrade"),
         )),
     )),
-    13: Shop(level=13, total=1764, items=(
+    13: Shop(level=13, items=(
         Item("Ninja Belt", 990, "upgrade"),
         Item("Bigger Grapple Points", 708, "maybe"),
         Item("__choice__", None, "choice", options=(
@@ -74,7 +92,7 @@ SHOPS: dict[int, Shop] = {
             Item("More Alters", 849, "upgrade"),
         )),
     )),
-    15: Shop(level=15, total=7870, items=(
+    15: Shop(level=15, items=(
         Item("Shield", 5960, "upgrade"),
         Item("Sports Shoes", 1910, "upgrade"),
     )),
