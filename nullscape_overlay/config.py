@@ -110,6 +110,12 @@ def fonts_dir() -> Path:
     return asset_dir() / "fonts"
 
 
+def diagnostics_dir() -> Path:
+    """Where detection snapshots are written when the user picks 'Save
+    detection snapshot' from the tray menu."""
+    return Path.home() / ".nullscape-overlay" / "diagnostics"
+
+
 def example_user_config() -> str:
     """Print this to help users write their own override file."""
     return json.dumps(

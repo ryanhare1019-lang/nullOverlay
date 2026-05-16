@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QPointF, QSize, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QSize, Qt
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -28,10 +28,13 @@ from PyQt6.QtGui import (
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QPen,
     QPixmap,
     QPolygonF,
+    QWheelEvent,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -248,6 +251,53 @@ class _ItemRow(QFrame):
         p.end()
 
 
+class _CloseButton(QWidget):
+    """Small (x) button — clicking it quits the application."""
+    from PyQt6.QtCore import pyqtSignal as _Signal
+    clicked_signal = _Signal()
+
+    def __init__(self, size: int) -> None:
+        super().__init__()
+        self.setFixedSize(size, size)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._hover = False
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        self.update()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        # Eat the event so the overlay drag handler doesn't see it.
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.pos()):
+            self.clicked_signal.emit()
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        event.accept()  # don't let drag handler treat this as a window drag
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        s = self.width()
+        bg = QColor(230, 80, 80, 235) if self._hover else QColor(160, 70, 90, 200)
+        p.setBrush(bg)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(1, 1, s - 2, s - 2)
+        p.setPen(QPen(QColor(245, 235, 235), max(2, s // 10), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        m = int(s * 0.32)
+        p.drawLine(m, m, s - m, s - m)
+        p.drawLine(s - m, m, m, s - m)
+        p.end()
+
+
 class _ChoiceHeader(QLabel):
     def __init__(self, scale: float) -> None:
         super().__init__("Choose one:")
@@ -329,6 +379,18 @@ class OverlayWindow(QWidget):
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
         )
 
+        # Footer: (x) close button on the left + "Duo Standard" label on the right.
+        self._footer_bar = QWidget()
+        self._footer_bar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        footer_layout = QHBoxLayout(self._footer_bar)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(int(6 * scale))
+
+        self._close_btn = _CloseButton(int(20 * scale))
+        self._close_btn.clicked_signal.connect(self._on_close_clicked)
+        footer_layout.addWidget(self._close_btn)
+        footer_layout.addStretch(1)
+
         self._footer = QLabel("Duo Standard")
         f = _body_font(int(11 * scale))
         f.setItalic(True)
@@ -337,17 +399,36 @@ class OverlayWindow(QWidget):
         self._footer.setStyleSheet(
             f"color: rgba({COLOR_DIM.red()},{COLOR_DIM.green()},{COLOR_DIM.blue()},255);"
         )
+        footer_layout.addWidget(self._footer)
 
         self._root.addWidget(self._header)
         self._root.addWidget(self._sub_header)
         self._root.addWidget(self._scroll, stretch=1)
-        self._root.addWidget(self._footer)
+        self._root.addWidget(self._footer_bar)
 
         self.setFixedWidth(self._width)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
 
+        # Capture wheel events delivered to ANY widget when the cursor is
+        # inside our window, so the gaps between rows / chrome areas all
+        # scroll the body too instead of falling through to Roblox.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
         self._render_state()
         self._reposition()
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Wheel:
+            try:
+                pos = event.globalPosition().toPoint()
+            except AttributeError:
+                pos = event.globalPos()
+            if self.isVisible() and self.geometry().contains(pos):
+                self.wheelEvent(event)
+                return event.isAccepted()
+        return super().eventFilter(obj, event)
 
     # ----------------------------------------------------------------- paint
     def paintEvent(self, event) -> None:
@@ -382,6 +463,29 @@ class OverlayWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_anchor = None
             event.accept()
+
+    def _on_close_clicked(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        # Capture wheel events anywhere on the overlay (including the gaps
+        # between rows, the header, the sub-header, and the footer) and route
+        # them to the scrollbar. Without this, wheel events in the transparent
+        # gaps fall through to the Roblox window underneath.
+        if self._scroll.isHidden():
+            event.ignore()
+            return
+        sb = self._scroll.verticalScrollBar()
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
+        # Step roughly one row per wheel notch.
+        step = max(1, int(48 * self._scale))
+        sb.setValue(sb.value() - int(delta / 120.0 * step))
+        event.accept()
 
     # --------------------------------------------------------------- layout
     def _body_content_height(self) -> int:

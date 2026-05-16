@@ -280,15 +280,61 @@ def detect_level(region_bgr: np.ndarray, templates: dict[str, list[np.ndarray]])
     return value
 
 
+def _save_diagnostic_snapshot(
+    region_bgr: np.ndarray,
+    templates: dict[str, list[np.ndarray]],
+    out_dir: Path,
+) -> Path:
+    """Write a PNG of the captured level region plus a JSON sidecar with the
+    per-digit scores and the detector's decision. Returns the PNG path.
+    """
+    import json
+    from datetime import datetime
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    png_path = out_dir / f"snapshot_{stamp}.png"
+    json_path = out_dir / f"snapshot_{stamp}.json"
+
+    cv2.imwrite(str(png_path), region_bgr)
+
+    boxes = _isolate_digit_blobs(region_bgr)
+    gray = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2GRAY) if region_bgr.ndim == 3 else region_bgr
+    blob_info = []
+    for x, y, w, h in boxes:
+        crop = gray[y:y + h, x:x + w]
+        scores = _score_all_digits(crop, templates)
+        _, crop_bin = cv2.threshold(crop, DIGIT_BRIGHTNESS_MIN, 255, cv2.THRESH_BINARY)
+        observed_holes = _count_holes(crop_bin)
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        blob_info.append({
+            "bbox": [int(x), int(y), int(w), int(h)],
+            "observed_holes": int(observed_holes),
+            "scores": {d: round(s, 4) for d, s in ranked},
+        })
+
+    decision = detect_level(region_bgr, templates)
+    json_path.write_text(json.dumps({
+        "decision": decision,
+        "match_threshold": MATCH_THRESHOLD,
+        "topology_tiebreaker_margin": TOPOLOGY_TIEBREAKER_MARGIN,
+        "blobs": blob_info,
+        "region_size": [int(region_bgr.shape[1]), int(region_bgr.shape[0])],
+    }, indent=2))
+    return png_path
+
+
 class LevelDetector(QThread):
     """Polls the level region every `interval_ms` and emits level_changed on change."""
 
     level_changed = pyqtSignal(int)
+    diagnostic_saved = pyqtSignal(str)  # absolute path to the saved PNG
 
     def __init__(
         self,
         level_region: tuple[int, int, int, int],
         digit_height: int,
+        diagnostics_dir: Path | None = None,
         interval_ms: int = 500,
         parent=None,
     ) -> None:
@@ -298,12 +344,21 @@ class LevelDetector(QThread):
         self._interval = interval_ms / 1000.0
         self._stop = False
         self._last_emitted: int | None = None
-        # Debounce: only emit after the same value is read N consecutive times.
         self._pending: int | None = None
         self._pending_count = 0
+        self._snapshot_requested = False
+        self._diag_dir = diagnostics_dir
 
     def stop(self) -> None:
         self._stop = True
+
+    def request_snapshot(self) -> None:
+        """Save the next captured frame + decision metadata to disk.
+
+        Picked up on the next polling tick; non-blocking from the caller's
+        perspective. Tray menu triggers this when the user notices a misread.
+        """
+        self._snapshot_requested = True
 
     def run(self) -> None:
         if mss is None:
@@ -317,7 +372,16 @@ class LevelDetector(QThread):
                     img = np.array(shot)[:, :, :3]  # drop alpha
                     level = detect_level(img, self._templates)
                 except Exception:
+                    img = None
                     level = None
+
+                if self._snapshot_requested and img is not None and self._diag_dir is not None:
+                    self._snapshot_requested = False
+                    try:
+                        path = _save_diagnostic_snapshot(img, self._templates, self._diag_dir)
+                        self.diagnostic_saved.emit(str(path))
+                    except Exception:
+                        pass  # best-effort; never crash the detector
 
                 if level is not None:
                     if level == self._pending:

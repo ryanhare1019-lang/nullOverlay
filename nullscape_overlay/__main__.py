@@ -39,11 +39,16 @@ def main() -> int:
     overlay = OverlayWindow(preset)
     overlay.show()
 
-    detector = LevelDetector(preset.level_region, preset.digit_height)
+    from .config import diagnostics_dir
+    detector = LevelDetector(
+        preset.level_region,
+        preset.digit_height,
+        diagnostics_dir=diagnostics_dir(),
+    )
     detector.level_changed.connect(overlay.set_level, type=Qt.ConnectionType.QueuedConnection)
     detector.start()
 
-    tray = TrayIcon(overlay)
+    tray = TrayIcon(overlay, detector=detector)
     tray.show()
 
     exit_code = app.exec()
