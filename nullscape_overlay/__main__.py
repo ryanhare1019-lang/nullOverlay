@@ -34,7 +34,16 @@ def main() -> int:
         QMessageBox.critical(None, "Nullscape Overlay", "No primary screen detected.")
         return 1
     size = screen.size()
+    geo = screen.geometry()
     preset = load_preset(size.width(), size.height())
+
+    screen_info = {
+        "qt_logical_size": [int(size.width()), int(size.height())],
+        "qt_geometry": [int(geo.x()), int(geo.y()), int(geo.width()), int(geo.height())],
+        "device_pixel_ratio": float(screen.devicePixelRatio()),
+        "physical_dots_per_inch": float(screen.physicalDotsPerInch()),
+        "preset_level_region": list(preset.level_region),
+    }
 
     overlay = OverlayWindow(preset)
     overlay.show()
@@ -44,6 +53,7 @@ def main() -> int:
         preset.level_region,
         preset.digit_height,
         diagnostics_dir=diagnostics_dir(),
+        screen_info=screen_info,
     )
     detector.level_changed.connect(overlay.set_level, type=Qt.ConnectionType.QueuedConnection)
     detector.start()

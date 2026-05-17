@@ -284,9 +284,14 @@ def _save_diagnostic_snapshot(
     region_bgr: np.ndarray,
     templates: dict[str, list[np.ndarray]],
     out_dir: Path,
+    region_origin: tuple[int, int] | None = None,
+    wider_context: np.ndarray | None = None,
+    screen_info: dict | None = None,
 ) -> Path:
     """Write a PNG of the captured level region plus a JSON sidecar with the
-    per-digit scores and the detector's decision. Returns the PNG path.
+    per-digit scores and the detector's decision. Also writes a wider
+    "context" PNG so we can see what's around when our region coordinates
+    are wrong. Returns the narrow PNG path.
     """
     import json
     from datetime import datetime
@@ -297,6 +302,8 @@ def _save_diagnostic_snapshot(
     json_path = out_dir / f"snapshot_{stamp}.json"
 
     cv2.imwrite(str(png_path), region_bgr)
+    if wider_context is not None:
+        cv2.imwrite(str(out_dir / f"snapshot_{stamp}_context.png"), wider_context)
 
     boxes = _isolate_digit_blobs(region_bgr)
     gray = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2GRAY) if region_bgr.ndim == 3 else region_bgr
@@ -314,13 +321,18 @@ def _save_diagnostic_snapshot(
         })
 
     decision = detect_level(region_bgr, templates)
-    json_path.write_text(json.dumps({
+    payload = {
         "decision": decision,
         "match_threshold": MATCH_THRESHOLD,
         "topology_tiebreaker_margin": TOPOLOGY_TIEBREAKER_MARGIN,
         "blobs": blob_info,
         "region_size": [int(region_bgr.shape[1]), int(region_bgr.shape[0])],
-    }, indent=2))
+    }
+    if region_origin is not None:
+        payload["region_origin"] = [int(region_origin[0]), int(region_origin[1])]
+    if screen_info is not None:
+        payload["screen"] = screen_info
+    json_path.write_text(json.dumps(payload, indent=2))
     return png_path
 
 
@@ -335,6 +347,7 @@ class LevelDetector(QThread):
         level_region: tuple[int, int, int, int],
         digit_height: int,
         diagnostics_dir: Path | None = None,
+        screen_info: dict | None = None,
         interval_ms: int = 500,
         parent=None,
     ) -> None:
@@ -348,6 +361,7 @@ class LevelDetector(QThread):
         self._pending_count = 0
         self._snapshot_requested = False
         self._diag_dir = diagnostics_dir
+        self._screen_info = screen_info
 
     def stop(self) -> None:
         self._stop = True
@@ -365,6 +379,14 @@ class LevelDetector(QThread):
             return
         x, y, w, h = self._region
         bbox = {"left": x, "top": y, "width": w, "height": h}
+        # Wider "context" capture for diagnostic snapshots: 400x120 centered
+        # roughly on the expected level region. Helps us see what's around
+        # when the level region coords are wrong on the user's setup.
+        ctx_w, ctx_h = 480, 120
+        ctx_left = max(0, x + w // 2 - ctx_w // 2)
+        ctx_top = max(0, y - 40)
+        ctx_bbox = {"left": ctx_left, "top": ctx_top, "width": ctx_w, "height": ctx_h}
+
         with mss.mss() as sct:
             while not self._stop:
                 try:
@@ -378,7 +400,17 @@ class LevelDetector(QThread):
                 if self._snapshot_requested and img is not None and self._diag_dir is not None:
                     self._snapshot_requested = False
                     try:
-                        path = _save_diagnostic_snapshot(img, self._templates, self._diag_dir)
+                        try:
+                            ctx_shot = sct.grab(ctx_bbox)
+                            wider = np.array(ctx_shot)[:, :, :3]
+                        except Exception:
+                            wider = None
+                        path = _save_diagnostic_snapshot(
+                            img, self._templates, self._diag_dir,
+                            region_origin=(x, y),
+                            wider_context=wider,
+                            screen_info=self._screen_info,
+                        )
                         self.diagnostic_saved.emit(str(path))
                     except Exception:
                         pass  # best-effort; never crash the detector
