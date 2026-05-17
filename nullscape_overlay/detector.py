@@ -30,9 +30,13 @@ except ImportError:  # mss isn't strictly needed for unit tests
 
 
 # Minimum normalized cross-correlation score for a digit match to count.
-# Multi-font templates lift the per-digit best score, so we can hold the
-# threshold at a level where 3 doesn't get confused with 8.
-MATCH_THRESHOLD = 0.42
+# Lowered from 0.42 once the multi-font + topology + real-templates safety
+# nets are all in place — narrow digits like "1" score ~0.35 against pure
+# synthetic Arial/Segoe templates because Roblox's "1" lacks the serifs
+# those fonts have. Real templates extracted from user captures push the
+# correct-digit score back up to ~0.95+, but we still want headroom for
+# any digit we don't yet have a real template for.
+MATCH_THRESHOLD = 0.30
 # Hole count (topological invariant) per digit — used as a tiebreaker when
 # the cross-correlation top-two are close enough that we can't trust the
 # winner (e.g. real "3" scoring 0.528 for 8 vs 0.521 for 3).
@@ -119,24 +123,53 @@ def _render_digit(digit: str, font, digit_height_px: int) -> np.ndarray | None:
     return binary
 
 
-def build_digit_templates(digit_height_px: int) -> dict[str, list[np.ndarray]]:
-    """Render multiple template variants per digit (one per available font).
+def _load_real_templates(target_height: int) -> dict[str, list[np.ndarray]]:
+    """Load pixel-perfect digit templates captured from the actual game,
+    resized to the target template height so they slot into the existing
+    matching pipeline uniformly.
 
-    Returns a dict {"0": [variant_a, variant_b, ...], ..., "9": [...]} of
-    single-channel binary masks (255 for digit pixels, 0 for background).
-    Callers correlate against EVERY variant and pick the best score per digit.
+    Real templates live in assets/digits_real/<digit>.png (binary masks).
+    When present, they massively outperform synthetic font renders since
+    they match Roblox's exact glyph shape.
     """
+    from .config import asset_dir
+    real_dir = asset_dir() / "digits_real"
+    out: dict[str, list[np.ndarray]] = {d: [] for d in "0123456789"}
+    if not real_dir.exists():
+        return out
+    for d in "0123456789":
+        path = real_dir / f"{d}.png"
+        if not path.exists():
+            continue
+        tpl = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if tpl is None:
+            continue
+        scale = target_height / max(1, tpl.shape[0])
+        new_w = max(1, int(tpl.shape[1] * scale))
+        resized = cv2.resize(tpl, (new_w, target_height), interpolation=cv2.INTER_AREA)
+        _, tpl_bin = cv2.threshold(resized, 80, 255, cv2.THRESH_BINARY)
+        out[d].append(tpl_bin)
+    return out
+
+
+def build_digit_templates(digit_height_px: int) -> dict[str, list[np.ndarray]]:
+    """Render multiple template variants per digit and prepend any real
+    pixel-perfect templates we have captured from gameplay.
+
+    Returns a dict {"0": [real..., synthetic...], ..., "9": [...]} of
+    single-channel binary masks (255 for digit pixels, 0 for background).
+    Real templates come first so they win ties.
+    """
+    real = _load_real_templates(digit_height_px)
     font_size = int(digit_height_px * 1.7)
     fonts = _load_all_fonts(font_size)
 
-    templates: dict[str, list[np.ndarray]] = {d: [] for d in "0123456789"}
+    templates: dict[str, list[np.ndarray]] = {d: list(real.get(d, [])) for d in "0123456789"}
     for font in fonts:
         for d in "0123456789":
             tpl = _render_digit(d, font, digit_height_px)
             if tpl is not None:
                 templates[d].append(tpl)
-    # Drop any digit that ended up with zero variants (shouldn't happen given
-    # PIL's default font fallback, but defend against it anyway).
     return {d: variants for d, variants in templates.items() if variants}
 
 
@@ -177,29 +210,31 @@ def _score_all_digits(
     crop_gray: np.ndarray,
     templates: dict[str, list[np.ndarray]],
 ) -> dict[str, float]:
-    """Return the best cross-correlation score per digit across every font
-    variant. Caller decides what to do with the ranking."""
-    _, crop_bin = cv2.threshold(crop_gray, DIGIT_BRIGHTNESS_MIN, 255, cv2.THRESH_BINARY)
+    """Return the best correlation score per digit across every font variant.
 
-    target_h = next(iter(templates.values()))[0].shape[0]
-    scale = target_h / max(1, crop_bin.shape[0])
-    new_w = max(1, int(crop_bin.shape[1] * scale))
-    crop_resized = cv2.resize(crop_bin, (new_w, target_h), interpolation=cv2.INTER_AREA)
+    For each template we resize the captured crop to the template's EXACT
+    dimensions and compute a single normalized correlation coefficient. This
+    is critical for narrow digits like "1": with the standard sliding-window
+    matchTemplate, a 3-wide "1" template can match the rightmost stroke of a
+    wider "3" digit nearly as well as it matches a real "1". Forcing the
+    crop to the template's aspect ratio means a wide digit gets squashed and
+    no longer matches the narrow template.
+    """
+    _, crop_bin = cv2.threshold(crop_gray, DIGIT_BRIGHTNESS_MIN, 255, cv2.THRESH_BINARY)
 
     digit_scores: dict[str, float] = {}
     for digit, variants in templates.items():
         digit_best = -1.0
         for tpl in variants:
-            # cv2.matchTemplate requires source >= template in both dims.
-            if crop_resized.shape[1] < tpl.shape[1]:
-                target = cv2.resize(tpl, (crop_resized.shape[1], target_h))
-                src = crop_resized
-            else:
-                target = crop_resized
-                src = tpl
-            if target.shape[1] < src.shape[1] or target.shape[0] < src.shape[0]:
+            if tpl.shape[0] < 2 or tpl.shape[1] < 2:
                 continue
-            score = float(cv2.matchTemplate(target, src, cv2.TM_CCOEFF_NORMED).max())
+            src_resized = cv2.resize(
+                crop_bin, (tpl.shape[1], tpl.shape[0]),
+                interpolation=cv2.INTER_AREA,
+            )
+            # Same-size matchTemplate returns a 1x1 result.
+            res = cv2.matchTemplate(src_resized, tpl, cv2.TM_CCOEFF_NORMED)
+            score = float(res[0, 0])
             if score > digit_best:
                 digit_best = score
         digit_scores[digit] = digit_best

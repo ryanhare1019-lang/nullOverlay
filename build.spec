@@ -13,6 +13,7 @@ pkg = root / "nullscape_overlay"
 datas = [
     (str(pkg / "assets" / "icons"), "assets/icons"),
     (str(pkg / "assets" / "fonts"), "assets/fonts"),
+    (str(pkg / "assets" / "digits_real"), "assets/digits_real"),
 ]
 
 a = Analysis(
